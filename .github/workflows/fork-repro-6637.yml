@@ -1,0 +1,72 @@
+name: Fork repro composed MPPI configure failure
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch of this fork to test
+        required: true
+      distro:
+        description: ROS distribution
+        default: jazzy
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: ghcr.io/ros-navigation/nav2_docker:${{ inputs.distro }}-nightly-standard
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install tooling
+        run: |
+          apt-get update
+          apt-get install -y git python3-colcon-common-extensions
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          path: ws/src/navigation2
+
+      - name: Install dependencies
+        working-directory: ws
+        run: |
+          rosdep update --rosdistro ${{ inputs.distro }}
+          rosdep install --from-paths src --ignore-src -r -y --skip-keys=slam_toolbox
+
+      - name: Build
+        working-directory: ws
+        run: |
+          . /opt/ros/${{ inputs.distro }}/setup.bash
+          colcon build --packages-up-to nav2_controller nav2_mppi_controller \
+            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Trigger failed configure in a composed container
+        working-directory: ws
+        run: |
+          . install/setup.bash
+          prefix=$(ros2 pkg prefix rclcpp_components)
+          "$prefix/lib/rclcpp_components/component_container_isolated" > container.log 2>&1 &
+          pid=$!
+          sleep 5
+          ros2 component load /ComponentManager nav2_controller nav2_controller::ControllerServer \
+            -p FollowPath.plugin:=nav2_mppi_controller::MPPIController \
+            -p 'FollowPath.critics:=[CostCritic]' \
+            -p FollowPath.CostCritic.enabled:=true \
+            -p FollowPath.CostCritic.consider_footprint:=true
+          sleep 5
+          timeout 120 ros2 lifecycle set /controller_server configure || true
+          sleep 15
+          echo "---- container log ----"
+          cat container.log
+          echo "---- result ----"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "REPRO_RESULT: container survived"
+          else
+            wait "$pid"
+            echo "REPRO_RESULT: container died with exit code $?"
+            exit 1
+          fi
+          grep -q "no robot footprint provided" container.log

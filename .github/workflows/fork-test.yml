@@ -40,7 +40,7 @@ jobs:
       - name: Import underlay and dependencies
         working-directory: ws
         run: |
-          vcs import src < src/navigation2/tools/underlay.${{ inputs.distro }}.repos
+          if [ -f src/navigation2/tools/underlay.${{ inputs.distro }}.repos ]; then vcs import src < src/navigation2/tools/underlay.${{ inputs.distro }}.repos; fi
           rosdep update --rosdistro ${{ inputs.distro }}
           rosdep install --from-paths src --ignore-src -r -y --skip-keys=slam_toolbox
 
