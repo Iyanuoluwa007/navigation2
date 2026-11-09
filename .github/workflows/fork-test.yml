@@ -1,0 +1,82 @@
+name: Fork package test
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch of this fork to test
+        required: true
+      distro:
+        description: ROS distribution
+        default: jazzy
+      packages:
+        description: Space separated packages to test
+        required: true
+      ctest_regex:
+        description: Optional ctest name filter
+        default: ''
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    container:
+      image: ghcr.io/ros-navigation/nav2_docker:${{ inputs.distro }}-nightly-standard
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install tooling
+        run: |
+          apt-get update
+          apt-get install -y git python3-colcon-common-extensions python3-vcstool \
+            ros-${{ inputs.distro }}-ament-uncrustify ros-${{ inputs.distro }}-ament-cpplint
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          path: ws/src/navigation2
+
+      - name: Import underlay and dependencies
+        working-directory: ws
+        run: |
+          vcs import src < src/navigation2/tools/underlay.${{ inputs.distro }}.repos
+          rosdep update --rosdistro ${{ inputs.distro }}
+          rosdep install --from-paths src --ignore-src -r -y --skip-keys=slam_toolbox
+
+      - name: Build dependencies without tests
+        working-directory: ws
+        run: |
+          . /opt/ros/${{ inputs.distro }}/setup.bash
+          colcon build --packages-up-to ${{ inputs.packages }} \
+            --packages-skip ${{ inputs.packages }} \
+            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build target packages with tests
+        working-directory: ws
+        run: |
+          . install/setup.bash
+          colcon build --packages-select ${{ inputs.packages }} \
+            --cmake-args -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Run tests
+        working-directory: ws
+        run: |
+          . install/setup.bash
+          if [ -n "${{ inputs.ctest_regex }}" ]; then
+            colcon test --packages-select ${{ inputs.packages }} \
+              --event-handlers console_direct+ --ctest-args -R "${{ inputs.ctest_regex }}"
+          else
+            colcon test --packages-select ${{ inputs.packages }} --event-handlers console_direct+
+          fi
+          colcon test-result --verbose
+
+      - name: Lint target packages
+        if: always()
+        working-directory: ws/src/navigation2
+        run: |
+          . /opt/ros/${{ inputs.distro }}/setup.bash
+          for pkg in ${{ inputs.packages }}; do
+            ament_uncrustify "$pkg"
+            ament_cpplint "$pkg"
+          done
