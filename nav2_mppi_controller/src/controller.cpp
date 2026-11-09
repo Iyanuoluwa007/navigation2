@@ -22,6 +22,13 @@
 namespace nav2_mppi_controller
 {
 
+MPPIController::~MPPIController()
+{
+  // The parameter callbacks are defined in the critic plugin library, which is unloaded when the
+  // optimizer is destroyed. Release them first, cleanup() does not run after a failed configure.
+  parameters_handler_.reset();
+}
+
 void MPPIController::configure(
   const rclcpp_lifecycle::LifecycleNode::WeakPtr & parent,
   std::string name, const std::shared_ptr<tf2_ros::Buffer> tf,
