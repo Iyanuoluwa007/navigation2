@@ -23,7 +23,7 @@ jobs:
       - name: Install tooling
         run: |
           apt-get update
-          apt-get install -y git python3-colcon-common-extensions
+          apt-get install -y git python3-colcon-common-extensions ros-${{ inputs.distro }}-navigation2 ros-${{ inputs.distro }}-nav2-bringup
 
       - uses: actions/checkout@v4
         if: inputs.ref != ''
