@@ -1,0 +1,69 @@
+name: Fork repro full composed bringup
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Fork branch to overlay nav2_mppi_controller from, empty for binaries only
+        default: ''
+      distro:
+        description: ROS distribution
+        default: jazzy
+
+jobs:
+  repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/ros-navigation/nav2_docker:${{ inputs.distro }}-nightly-standard
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install tooling
+        run: |
+          apt-get update
+          apt-get install -y git python3-colcon-common-extensions
+
+      - uses: actions/checkout@v4
+        if: inputs.ref != ''
+        with:
+          ref: ${{ inputs.ref }}
+          path: ws/src/navigation2
+
+      - name: Overlay MPPI only
+        if: inputs.ref != ''
+        working-directory: ws
+        run: |
+          . /opt/ros/${{ inputs.distro }}/setup.bash
+          colcon build --packages-select nav2_mppi_controller \
+            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Run composed bringup with the invalid critic config
+        run: |
+          if [ -f ws/install/setup.bash ]; then . ws/install/setup.bash; else . /opt/ros/${{ inputs.distro }}/setup.bash; fi
+          echo "mppi prefix: $(ros2 pkg prefix nav2_mppi_controller)"
+          share=$(ros2 pkg prefix nav2_bringup)/share/nav2_bringup
+          sed 's/consider_footprint: false/consider_footprint: true/' "$share/params/nav2_params.yaml" > /tmp/params.yaml
+          grep -n "consider_footprint\|robot_radius\|use_composition" /tmp/params.yaml || true
+          map=$(ls "$share"/maps/*.yaml | head -1)
+          ros2 launch nav2_bringup bringup_launch.py use_composition:=True use_respawn:=False \
+            slam:=False map:="$map" params_file:=/tmp/params.yaml > launch.log 2>&1 &
+          pid=$!
+          sleep 75
+          cp launch.log snapshot.log
+          kill -INT "$pid" || true
+          echo "---- relevant log ----"
+          grep -nE "no robot footprint|process has died|Segmentation|SIGSEGV|signal 11|Attempting to unload|Inconsistent configuration|Failed to change state|Original error" snapshot.log | cut -c1-220 || true
+          echo "---- result ----"
+          if grep -qE "component_container.*process has died|Segmentation|SIGSEGV|signal 11" snapshot.log; then
+            echo "REPRO_RESULT: container crashed"
+            exit 1
+          fi
+          if grep -q "no robot footprint provided" snapshot.log; then
+            echo "REPRO_RESULT: clean configure failure"
+          else
+            echo "REPRO_RESULT: inconclusive, error never reached"
+            tail -40 snapshot.log | cut -c1-220
+            exit 2
+          fi
