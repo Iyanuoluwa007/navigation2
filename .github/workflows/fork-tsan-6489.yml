@@ -1,0 +1,73 @@
+name: Fork TSan lifecycle manager preshutdown
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch of this fork to test
+        required: true
+      distro:
+        description: ROS distribution
+        default: jazzy
+
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    container:
+      image: ghcr.io/ros-navigation/nav2_docker:${{ inputs.distro }}-nightly-standard
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install tooling
+        run: |
+          apt-get update
+          apt-get install -y git python3-colcon-common-extensions python3-vcstool util-linux
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          path: ws/src/navigation2
+
+      - name: Dependencies
+        working-directory: ws
+        run: |
+          if [ -f src/navigation2/tools/underlay.${{ inputs.distro }}.repos ]; then vcs import src < src/navigation2/tools/underlay.${{ inputs.distro }}.repos; fi
+          rosdep update --rosdistro ${{ inputs.distro }}
+          rosdep install --from-paths src --ignore-src -r -y --skip-keys=slam_toolbox
+
+      - name: Build
+        working-directory: ws
+        run: |
+          . /opt/ros/${{ inputs.distro }}/setup.bash
+          colcon build --packages-up-to nav2_lifecycle_manager --packages-skip nav2_lifecycle_manager \
+            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+          . install/setup.bash
+          colcon build --packages-select nav2_lifecycle_manager --cmake-args -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            "-DCMAKE_CXX_FLAGS=-fsanitize=thread -g -O1 -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread \
+            -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread
+
+      - name: Run under ThreadSanitizer
+        working-directory: ws
+        run: |
+          sysctl -w vm.mmap_rnd_bits=28 || true
+          . install/setup.bash
+          mkdir -p /tmp/tsan
+          export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:history_size=7:log_path=/tmp/tsan/report"
+          set +e
+          timeout 90 setarch x86_64 -R build/nav2_lifecycle_manager/test/test_preshutdown_during_init > test.log 2>&1
+          code=$?
+          set -e
+          tail -25 test.log | cut -c1-200
+          echo "TEST_EXIT_CODE: $code"
+          ls -la /tmp/tsan || true
+          total=$(cat /tmp/tsan/report.* 2>/dev/null | grep -c "WARNING: ThreadSanitizer" || true)
+          echo "TSAN_REPORTS_TOTAL: $total"
+          relevant=$(cat /tmp/tsan/report.* 2>/dev/null | awk 'BEGIN{RS="=================="; n=0} /WARNING: ThreadSanitizer/ && /LifecycleManager::/ {n++; if (n<=2) print} END{print "TSAN_REPORTS_IN_LIFECYCLE_MANAGER: " n}' | cut -c1-170)
+          echo "$relevant" | tail -60
+          echo "$relevant" | grep -q "TSAN_REPORTS_IN_LIFECYCLE_MANAGER: 0"
+          test "$code" = "0"
