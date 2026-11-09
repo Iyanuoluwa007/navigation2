@@ -37,7 +37,10 @@ jobs:
         run: |
           . /opt/ros/${{ inputs.distro }}/setup.bash
           colcon build --packages-select nav2_mppi_controller \
-            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
+            --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          ls -la install/nav2_mppi_controller/lib/*.so
+          cp install/nav2_mppi_controller/lib/*.so /opt/ros/${{ inputs.distro }}/lib/
+          rm -rf install
 
       - name: Run composed bringup with the invalid critic config
         run: |
